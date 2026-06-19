@@ -224,7 +224,7 @@ new file mode 100644
 + * rfx_log_to_lin - convert corrected log32fpmax (Q5.26) back to u32
 + *
 + * Specialized from intfp log32fpmax_to_u32_corr().
- */
++ */
 +static inline u32 rfx_log_to_lin(s32 v)
 +{
 +	bool negative;
@@ -982,7 +982,7 @@ new file mode 100644
 +	rfx_pol->tunables = tunables;
 +
 +	ret = kobject_init_and_add(&tunables->attr_set.kobj,
-+				   &rfx_tunables_ktype,
++				   &tunables->attr_set.kobj,
 +				   get_governor_parent_kobj(policy), "%s",
 +				   reflex_gov.name);
 +	if (ret)
