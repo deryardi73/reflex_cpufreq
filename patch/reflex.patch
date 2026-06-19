@@ -1,7 +1,7 @@
 diff --git a/drivers/cpufreq/Kconfig b/drivers/cpufreq/Kconfig
 --- a/drivers/cpufreq/Kconfig
 +++ b/drivers/cpufreq/Kconfig
-@@ -210,5 +210,14 @@
+@@ -195,7 +195,16 @@ config CPU_FREQ_GOV_SCHEDUTIL
  	  The
  	  frequency tipping point is at utilization/capacity equal to 80% in
  	  both cases.
@@ -15,18 +15,21 @@ diff --git a/drivers/cpufreq/Kconfig b/drivers/cpufreq/Kconfig
 +	help
 +	  Reflex CPUFreq governor blends PELT utilization with idle-time
 +	  accounting for optimized frequency scaling.
+ 
  comment "CPU frequency scaling drivers"
  config CPUFREQ_DT
 diff --git a/kernel/sched/build_utility.c b/kernel/sched/build_utility.c
 --- a/kernel/sched/build_utility.c
 +++ b/kernel/sched/build_utility.c
-@@ -50,5 +50,9 @@
+@@ -50,7 +50,11 @@
  #ifdef CONFIG_CPU_FREQ_GOV_SCHEDUTIL
  # include "cpufreq_schedutil.c"
  #endif
++
 +#ifdef CONFIG_CPU_FREQ_GOV_REFLEX
 +# include "cpufreq_reflex.c"
 +#endif
+ 
  #ifdef CONFIG_SCHED_DEBUG
  # include "debug.c"
  #endif
