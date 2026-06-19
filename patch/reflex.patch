@@ -1,30 +1,37 @@
 diff --git a/drivers/cpufreq/Kconfig b/drivers/cpufreq/Kconfig
 --- a/drivers/cpufreq/Kconfig
 +++ b/drivers/cpufreq/Kconfig
-@@ -200,3 +200,12 @@ config CPU_FREQ_GOV_SCHEDUTIL
- 	  parameter.
- 
+@@ -195,3 +195,14 @@ config CPU_FREQ_GOV_SCHEDUTIL
+ 	  The
+ 	  frequency tipping point is at utilization/capacity equal to 80% in
+ 	  both cases.
  	  If in doubt, say N.
 +
 +config CPU_FREQ_GOV_REFLEX
 +	tristate "'reflex' CPUFreq governor"
-+	depends on CPU_FREQ
++	depends on CPU_FREQ && SMP
 +	select CPU_FREQ_GOV_ATTR_SET
++	select IRQ_WORK
 +	help
 +	  Reflex CPUFreq governor blends PELT utilization with idle-time
 +	  accounting for optimized frequency scaling.
-+
+ 
+ comment "CPU frequency scaling drivers"
+ config CPUFREQ_DT
 diff --git a/kernel/sched/build_utility.c b/kernel/sched/build_utility.c
 --- a/kernel/sched/build_utility.c
 +++ b/kernel/sched/build_utility.c
-@@ -90,3 +90,7 @@
+@@ -50,3 +50,7 @@
  #ifdef CONFIG_CPU_FREQ_GOV_SCHEDUTIL
- #include "cpufreq_schedutil.c"
+ # include "cpufreq_schedutil.c"
  #endif
 +
 +#ifdef CONFIG_CPU_FREQ_GOV_REFLEX
-+#include "cpufreq_reflex.c"
++# include "cpufreq_reflex.c"
 +#endif
+ 
+ #ifdef CONFIG_SCHED_DEBUG
+ # include "debug.c"
 diff --git a/kernel/sched/cpufreq_reflex.c b/kernel/sched/cpufreq_reflex.c
 new file mode 100644
 --- /dev/null
@@ -376,10 +383,6 @@ new file mode 100644
 +		/*
 +		 * Phase 1: Window expired.  Reset busy_pct and request
 +		 * an immediate measurement on the next callback.
-+		 *
-+		 * Do NOT touch hispeed_start_ns or hispeed_idle_windows
-+		 * here: the momentary busy_pct=0 is a two-phase
-+		 * measurement artifact, not a genuine idle signal.
 +		 */
 +		rfx_c->busy_pct = 0;
 +		rfx_c->hispeed_active = true;
@@ -415,8 +418,6 @@ new file mode 100644
 +	 * Asymmetric EWMA filter on busy_pct:
 +	 * Up:   instant tracking  (filtered = measured)
 +	 * Down: slow ramp-down    (filtered -= (filtered - measured) >> shift)
-+	 *
-+	 * shift=0 disables the filter.  Higher shift = slower decay.
 +	 */
 +	if (!filter_shift || rfx_c->busy_pct >= rfx_c->filtered_busy_pct) {
 +		rfx_c->filtered_busy_pct = rfx_c->busy_pct;
@@ -432,11 +433,6 @@ new file mode 100644
 +
 +	/*
 +	 * Hispeed decay timer tracking with one-window grace period.
-+	 *
-+	 * The decay timer (hispeed_start_ns) is only reset after two
-+	 * consecutive idle windows.  This prevents rapid idle/busy
-+	 * spinning from constantly resetting the timer, which would
-+	 * keep the hispeed weight at 1.0 and defeat decay.
 +	 */
 +	if (rfx_c->filtered_busy_pct > 0) {
 +		rfx_c->hispeed_idle_windows = 0;
@@ -457,19 +453,6 @@ new file mode 100644
 +/*
 + * Blend PELT utilization with hispeed utilization using PELT-complementary
 + * continuous exponential decay.
-+ *
-+ * The hispeed contribution decays in log-domain at 1 ms granularity
-+ * using PELT's 32 ms half-life (y = 2^(-1/32) per ms):
-+ *
-+ * hispeed_decayed = 2^(log_hispeed + elapsed_ms × log2(y))
-+ * blended = min(pelt + hispeed_decayed, hispeed_util)
-+ *
-+ * By decaying hispeed_util directly (not the gap hispeed−pelt), the
-+ * sum pelt + hispeed_decayed matches actual utilization as PELT ramps
-+ * up, avoiding the double-decay artifact of the previous formulation.
-+ *
-+ * When hispeed_util <= pelt_util, hispeed is transparent.
-+ * After 320 ms (10 half-lives), the hispeed contribution is negligible.
 + */
 +static unsigned long rfx_blend_util(struct rfx_cpu *rfx_c,
 +				    unsigned long pelt_util,
@@ -616,15 +599,12 @@ new file mode 100644
 +	rfx_get_util(rfx_c, boost);
 +	effective_util = max(rfx_c->util, boost);
 +
-+	/* Blend PELT util with hispeed util (decayed by PELT half-life) */
 +	rfx_update_busy_pct(rfx_c, tunables->hispeed_window_us,
 +			    tunables->hispeed_filter_shift, time, max_cap);
 +	effective_util = rfx_blend_util(rfx_c, effective_util, max_cap, time);
 +
-+	/* Proportional scaling (schedutil-identical) */
 +	next_f = rfx_get_next_freq(rfx_pol, effective_util, max_cap);
 +
-+	/* Hold frequency if CPU has not been idle (schedutil-identical) */
 +	if (rfx_hold_freq(rfx_c) && next_f < rfx_pol->next_freq &&
 +	    !rfx_pol->need_freq_update) {
 +		next_f = rfx_pol->next_freq;
@@ -742,7 +722,6 @@ new file mode 100644
 +	return container_of(attr_set, struct rfx_tunables, attr_set);
 +}
 +
-+/* Macro to define show/store for unsigned int tunables */
 +#define RFX_TUNABLE_UINT(name)						\
 +static ssize_t name##_show(struct gov_attr_set *attr_set, char *buf)	\
 +{									\
@@ -761,7 +740,6 @@ new file mode 100644
 +}									\
 +static struct governor_attr name = __ATTR_RW(name)
 +
-+/* rate_limit_us needs special handling to update delay_ns */
 +static ssize_t rfx_rate_limit_us_show(struct gov_attr_set *attr_set, char *buf)
 +{
 +	struct rfx_tunables *tunables = to_rfx_tunables(attr_set);
@@ -806,7 +784,7 @@ new file mode 100644
 +	&hispeed_window_us.attr,
 +	&hispeed_filter_shift.attr,
 +	NULL
-};
++};
 +ATTRIBUTE_GROUPS(rfx);
 +
 +static void rfx_tunables_free(struct kobject *kobj)
@@ -853,10 +831,6 @@ new file mode 100644
 +		.sched_flags	= SCHED_FLAG_SUGOV,
 +		.sched_nice	= 0,
 +		.sched_priority	= 0,
-+		/*
-+		 * Fake (unused) bandwidth; workaround to "fix"
-+		 * priority inheritance.
-+		 */
 +		.sched_runtime	= NSEC_PER_MSEC,
 +		.sched_deadline = 10 * NSEC_PER_MSEC,
 +		.sched_period	= 10 * NSEC_PER_MSEC,
@@ -864,7 +838,6 @@ new file mode 100644
 +	struct cpufreq_policy *policy = rfx_pol->policy;
 +	int ret;
 +
-+	/* kthread only required for slow path */
 +	if (policy->fast_switch_enabled)
 +		return 0;
 +
@@ -973,7 +946,6 @@ new file mode 100644
 +		goto stop_kthread;
 +	}
 +
-+	/* Default tunable values */
 +	tunables->rate_limit_us = cpufreq_policy_transition_delay_us(policy);
 +	tunables->hispeed_window_us = CPUFREQ_REFLEX_DEFAULT_HISPEED_WINDOW_US;
 +	tunables->hispeed_filter_shift = CPUFREQ_REFLEX_DEFAULT_HISPEED_FILTER_SHIFT;
@@ -1053,7 +1025,6 @@ new file mode 100644
 +		memset(rfx_c, 0, sizeof(*rfx_c));
 +		rfx_c->cpu = cpu;
 +		rfx_c->rfx_policy = rfx_pol;
-+		/* Initialize idle-time baseline via GKI 6.6 API */
 +		rfx_c->prev_idle_time = get_cpu_idle_time_us(cpu, &rfx_c->prev_wall_time);
 +		cpufreq_add_update_util_hook(cpu, &rfx_c->update_util,
 +					     policy_is_shared(policy) ?
