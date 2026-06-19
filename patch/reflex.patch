@@ -1,7 +1,7 @@
 diff --git a/drivers/cpufreq/Kconfig b/drivers/cpufreq/Kconfig
 --- a/drivers/cpufreq/Kconfig
 +++ b/drivers/cpufreq/Kconfig
-@@ -195,3 +195,14 @@ config CPU_FREQ_GOV_SCHEDUTIL
+@@ -195,7 +195,16 @@ config CPU_FREQ_GOV_SCHEDUTIL
  	  The
  	  frequency tipping point is at utilization/capacity equal to 80% in
  	  both cases.
@@ -21,7 +21,7 @@ diff --git a/drivers/cpufreq/Kconfig b/drivers/cpufreq/Kconfig
 diff --git a/kernel/sched/build_utility.c b/kernel/sched/build_utility.c
 --- a/kernel/sched/build_utility.c
 +++ b/kernel/sched/build_utility.c
-@@ -50,3 +50,7 @@
+@@ -50,6 +50,10 @@
  #ifdef CONFIG_CPU_FREQ_GOV_SCHEDUTIL
  # include "cpufreq_schedutil.c"
  #endif
