@@ -1,29 +1,29 @@
 diff --git a/drivers/cpufreq/Kconfig b/drivers/cpufreq/Kconfig
 --- a/drivers/cpufreq/Kconfig
 +++ b/drivers/cpufreq/Kconfig
-@@ -197,3 +197,12 @@ config CPU_FREQ_GOV_SCHEDUTIL
- 	  both cases.
+@@ -200,3 +200,12 @@ config CPU_FREQ_GOV_SCHEDUTIL
+ 	  parameter.
  
  	  If in doubt, say N.
 +
 +config CPU_FREQ_GOV_REFLEX
 +	tristate "'reflex' CPUFreq governor"
-+	depends on CPU_FREQ && SMP
++	depends on CPU_FREQ
 +	select CPU_FREQ_GOV_ATTR_SET
-+	select IRQ_WORK
 +	help
 +	  Reflex CPUFreq governor blends PELT utilization with idle-time
 +	  accounting for optimized frequency scaling.
++
 diff --git a/kernel/sched/build_utility.c b/kernel/sched/build_utility.c
 --- a/kernel/sched/build_utility.c
 +++ b/kernel/sched/build_utility.c
 @@ -90,3 +90,7 @@
  #ifdef CONFIG_CPU_FREQ_GOV_SCHEDUTIL
- # include "cpufreq_schedutil.c"
+ #include "cpufreq_schedutil.c"
  #endif
 +
 +#ifdef CONFIG_CPU_FREQ_GOV_REFLEX
-+# include "cpufreq_reflex.c"
++#include "cpufreq_reflex.c"
 +#endif
 diff --git a/kernel/sched/cpufreq_reflex.c b/kernel/sched/cpufreq_reflex.c
 new file mode 100644
