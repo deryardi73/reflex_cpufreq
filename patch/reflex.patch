@@ -1,35 +1,17 @@
-diff --git a/drivers/cpufreq/Kconfig b/drivers/cpufreq/Kconfig
---- a/drivers/cpufreq/Kconfig
-+++ b/drivers/cpufreq/Kconfig
-@@ -200,3 +200,12 @@ config CPU_FREQ_GOV_SCHEDUTIL
- 	  parameter.
- 
- 	  If in doubt, say N.
-+
-+config CPU_FREQ_GOV_REFLEX
-+	tristate "'reflex' CPUFreq governor"
-+	depends on CPU_FREQ
-+	select CPU_FREQ_GOV_ATTR_SET
-+	help
-+	  Reflex CPUFreq governor blends PELT utilization with idle-time
-+	  accounting for optimized frequency scaling.
-+
-diff --git a/kernel/sched/build_utility.c b/kernel/sched/build_utility.c
---- a/kernel/sched/build_utility.c
-+++ b/kernel/sched/build_utility.c
-@@ -90,3 +90,7 @@
- #ifdef CONFIG_CPU_FREQ_GOV_SCHEDUTIL
- #include "cpufreq_schedutil.c"
- #endif
-+
-+#ifdef CONFIG_CPU_FREQ_GOV_REFLEX
-+#include "cpufreq_reflex.c"
-+#endif
+From: Masahito S <firelzrd@gmail.com>
+Date: Sat, 20 Jun 2026 14:00:00 +0700
+Subject: [PATCH] sched: cpufreq: Add Reflex governor for GKI 6.6
+
+---
+ kernel/sched/cpufreq_reflex.c | 682 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 682 insertions(+)
+ create mode 100644 kernel/sched/cpufreq_reflex.c
+
 diff --git a/kernel/sched/cpufreq_reflex.c b/kernel/sched/cpufreq_reflex.c
 new file mode 100644
 --- /dev/null
 +++ b/kernel/sched/cpufreq_reflex.c
-@@ -0,0 +1,644 @@
+@@ -0,0 +1,682 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Reflex CPUFreq governor (based on schedutil)
@@ -37,19 +19,6 @@ new file mode 100644
 + *
 + * schedutil + idle-time accounting based hispeed floor with PELT-
 + * complementary exponential decay.
-+ *
-+ * Frequency scaling is identical to schedutil (including the 1.25×
-+ * DVFS headroom) except for the hispeed blend:
-+ *
-+ * On each observation window, real CPU busy% is measured from
-+ * kcpustat idle-time counters.  This is blended with PELT util:
-+ *
-+ * blended = pelt + (hispeed - pelt) >> half_lives
-+ *
-+ * The blend decays with PELT's 32 ms half-life: every 32 ms, the
-+ * hispeed contribution halves while PELT fills the same gap,
-+ * keeping total coverage at ~100%.  After ~320 ms hispeed is
-+ * negligible and PELT-based proportional scaling takes full control.
 + */
 +
 +#include "sched.h"
@@ -81,7 +50,6 @@ new file mode 100644
 + */
 +#define CPUFREQ_REFLEX_DEFAULT_HISPEED_WINDOW_US   4000
 +#define CPUFREQ_REFLEX_DEFAULT_HISPEED_FILTER_SHIFT   1
-+
 +
 +#define IOWAIT_BOOST_MIN	(SCHED_CAPACITY_SCALE / 8)
 +
@@ -147,13 +115,7 @@ new file mode 100644
 +
 +static DEFINE_PER_CPU(struct rfx_cpu, rfx_cpu);
 +
-+/*
-+ * Minimal intfp log-domain helpers for hispeed decay.
-+ * Specialized from intfp.h (v1.4) for u32 <-> log32fpmax_corr.
-+ *
-+ * log32fpmax for u32: sign=1, exponent=5, mantissa(ofp)=26 bits.
-+ * log2(0.97857206) = -1/32 = -2097152 in Q5.26 fixed-point.
-+ */
++/* Minimal intfp log-domain helpers for hispeed decay. */
 +#define RFX_LOG_OFP		26
 +#define RFX_LOG_0		S32_MIN
 +#define RFX_LOG_DECAY_PER_MS	(-2097152)	/* log2(0.97857206) in Q5.26 */
@@ -197,11 +159,6 @@ new file mode 100644
 +	 1320,  1243,  1165,  1086,  1006,   926,   846,   764,   682,   599,   516,   431,   346,   261,   175,    88,
 +};
 +
-+/*
-+ * rfx_lin_to_log - convert u32 to corrected log32fpmax (Q5.26)
-+ *
-+ * Specialized from intfp u32_to_log32fpmax_corr().
-+ */
 +static inline s32 rfx_lin_to_log(u32 v)
 +{
 +	u8 clz;
@@ -220,11 +177,6 @@ new file mode 100644
 +	return (s32)(((u32)(30 - clz) << RFX_LOG_OFP) + m);
 +}
 +
-+/*
-+ * rfx_log_to_lin - convert corrected log32fpmax (Q5.26) back to u32
-+ *
-+ * Specialized from intfp log32fpmax_to_u32_corr().
-+ */
 +static inline u32 rfx_log_to_lin(s32 v)
 +{
 +	bool negative;
@@ -305,6 +257,17 @@ new file mode 100644
 +	}
 +}
 +
++static inline unsigned long map_util_perf(unsigned long util)
++{
++	return util + (util >> 2);
++}
++
++static inline unsigned int map_util_freq(unsigned long util,
++					 unsigned long freq, unsigned long cap)
++{
++	return map_util_perf(util) * freq / cap;
++}
++
 +static unsigned int rfx_get_next_freq(struct rfx_policy *rfx_pol,
 +				      unsigned long util, unsigned long max)
 +{
@@ -315,7 +278,7 @@ new file mode 100644
 +	if (arch_scale_freq_invariant())
 +		freq = policy->cpuinfo.max_freq;
 +	else
-+		freq = policy->cur + (policy->cur >> 2);
++		freq = policy->cur;
 +
 +	trace_android_vh_map_util_freq(util, freq, max, &next_freq, policy,
 +				       &rfx_pol->need_freq_update);
@@ -341,26 +304,20 @@ new file mode 100644
 +	return l_freq;
 +}
 +
-+/*
-+ * Get CPU utilization via exported helper (GKI 6.6 Modernized Adaptations).
-+ */
++/* Get CPU utilization via exported helper for GKI 6.6 */
 +static void rfx_get_util(struct rfx_cpu *rfx_c, unsigned long boost)
 +{
 +	struct rq *rq = cpu_rq(rfx_c->cpu);
-+	unsigned long util = cpu_util_cfs(rfx_c->cpu);
-+	unsigned long max_cap;
++	unsigned long util = cpu_util_cfs(rq);
++	unsigned long min_cap, max_cap;
 +
 +	rfx_c->bw_min = cpu_bw_dl(rq);
-+	rfx_c->util   = effective_cpu_util(rfx_c->cpu, util, FREQUENCY_UTIL, &max_cap);
++	rfx_c->util   = effective_cpu_util(rfx_c->cpu, util, &min_cap, &max_cap);
 +	rfx_c->util   = max(rfx_c->util, boost);
 +}
 +
 +/************************ Hispeed (idle-time accounting) ***********************/
 +
-+/*
-+ * Update busy% using kernel idle-time accounting (kcpustat).
-+ * This gives the raw CPU busy ratio without PELT smoothing.
-+ */
 +static void rfx_update_busy_pct(struct rfx_cpu *rfx_c,
 +				unsigned int window_us,
 +				unsigned int filter_shift, u64 time,
@@ -373,10 +330,6 @@ new file mode 100644
 +	wall_delta = (unsigned int)(cur_wall - rfx_c->prev_wall_time);
 +
 +	if (wall_delta >= window_us) {
-+		/*
-+		 * Phase 1: Window expired.  Reset busy_pct and request
-+		 * an immediate measurement on the next callback.
-+		 */
 +		rfx_c->busy_pct = 0;
 +		rfx_c->hispeed_active = true;
 +		rfx_c->prev_idle_time = cur_idle;
@@ -384,14 +337,9 @@ new file mode 100644
 +		return;
 +	}
 +
-+	/*
-+	 * Within the current window.  Skip unless hispeed_active is
-+	 * set, which requests an immediate post-reset measurement.
-+	 */
 +	if (!rfx_c->hispeed_active)
 +		return;
 +
-+	/* Phase 2: immediate post-reset measurement. */
 +	rfx_c->hispeed_active = false;
 +
 +	if (cur_idle > rfx_c->prev_idle_time)
@@ -407,11 +355,6 @@ new file mode 100644
 +	rfx_c->prev_idle_time = cur_idle;
 +	rfx_c->prev_wall_time = cur_wall;
 +
-+	/*
-+	 * Asymmetric EWMA filter on busy_pct:
-+	 * Up:   instant tracking  (filtered = measured)
-+	 * Down: slow ramp-down    (filtered -= (filtered - measured) >> shift)
-+	 */
 +	if (!filter_shift || rfx_c->busy_pct >= rfx_c->filtered_busy_pct) {
 +		rfx_c->filtered_busy_pct = rfx_c->busy_pct;
 +	} else {
@@ -424,9 +367,6 @@ new file mode 100644
 +			rfx_c->filtered_busy_pct = rfx_c->busy_pct;
 +	}
 +
-+	/*
-+	 * Hispeed decay timer tracking with one-window grace period.
-+	 */
 +	if (rfx_c->filtered_busy_pct > 0) {
 +		rfx_c->hispeed_idle_windows = 0;
 +		if (!rfx_c->hispeed_start_ns)
@@ -443,10 +383,6 @@ new file mode 100644
 +	}
 +}
 +
-+/*
-+ * Blend PELT utilization with hispeed utilization using PELT-complementary
-+ * continuous exponential decay.
-+ */
 +static unsigned long rfx_blend_util(struct rfx_cpu *rfx_c,
 +				    unsigned long pelt_util,
 +				    unsigned long max_cap,
@@ -789,7 +725,7 @@ new file mode 100644
 +
 +static struct kobj_type rfx_tunables_ktype = {
 +	.default_groups = rfx_groups,
-+	.sysfs_ops = &governor_sysfs_ops,
++	.sysfs_ops = &goversysfs_ops,
 +	.release = &rfx_tunables_free,
 +};
 +
@@ -947,7 +883,7 @@ new file mode 100644
 +	rfx_pol->tunables = tunables;
 +
 +	ret = kobject_init_and_add(&tunables->attr_set.kobj,
-+				   &tunables->attr_set.kobj,
++				   &rfx_tunables_ktype,
 +				   get_governor_parent_kobj(policy), "%s",
 +				   reflex_gov.name);
 +	if (ret)
@@ -1094,3 +1030,5 @@ new file mode 100644
 +MODULE_AUTHOR(CPUFREQ_REFLEX_AUTHOR);
 +MODULE_LICENSE("GPL");
 +MODULE_DESCRIPTION(CPUFREQ_REFLEX_PROGNAME);
+--
+2.34.1
