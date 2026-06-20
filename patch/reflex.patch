@@ -3,15 +3,15 @@ Date: Sat, 20 Jun 2026 14:00:00 +0700
 Subject: [PATCH] sched: cpufreq: Add Reflex governor for GKI 6.6
 
 ---
- kernel/sched/cpufreq_reflex.c | 650 ++++++++++++++++++++++++++++++++++
- 1 file changed, 650 insertions(+)
+ kernel/sched/cpufreq_reflex.c | 1009 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 1009 insertions(+)
  create mode 100644 kernel/sched/cpufreq_reflex.c
 
 diff --git a/kernel/sched/cpufreq_reflex.c b/kernel/sched/cpufreq_reflex.c
 new file mode 100644
 --- /dev/null
 +++ b/kernel/sched/cpufreq_reflex.c
-@@ -0,0 +1,650 @@
+@@ -0,0 +1,1009 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Reflex CPUFreq governor (based on schedutil)
